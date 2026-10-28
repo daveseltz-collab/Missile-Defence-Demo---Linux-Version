@@ -1,31 +1,29 @@
-# Ship Defense Demo (Apps Folder)
+# Missile Defense applications
 
-This folder contains the Ship Defense demonstration applications using SDL2 and RTI Connext DDS.
+This directory contains the SDL2 command-and-control display and the two
+independent DDS processes:
 
-## What is included
-- `command_control/main.cpp`: Threat publisher and command/control UI.
-- `sensor/main.cpp`: Threat subscriber and sensor detection publisher.
-- `effector/main.cpp`: Threat subscriber and effector action publisher.
+- `command_control/`: threat publisher, sensor/effector subscribers, and live
+  endpoint QoS controls.
+- `sensor/`: threat subscriber and sensor-detection publisher.
+- `effector/`: threat subscriber and weapon-action publishers.
 
-## DDS Type Generation
-This project is based on the IDL file at `../idl/ShipThreat.idl`.
+Generate Connext C++ type support from the repository root with:
 
-### Generate Connext types
-From this folder run:
-
-```bat
-cd apps
-generate_rtiddsgen.bat
+```bash
+./scripts/generate_rtiddsgen.sh
 ```
 
-The script will use `RTIDDSGEN_OUTPUT_DIR` if set, otherwise it generates directly into `../idl/generated`.
+The script writes files to `idl/generated/` by default. Set `NDDSHOME` or
+`RTI_CONNEXTDDS_DIR` to the RTI Connext DDS installation root, and set
+`RTIDDSGEN_OUTPUT_DIR` to choose another output directory.
 
-## Build Notes
-- Ensure `RTI_CONNEXTDDS_DIR` points to your RTI Connext DDS installation root.
-- Ensure `nddscpp` is available on `PATH` or use the Connext `bin` folder.
-- `SDL2` must be installed and discoverable by CMake.
-
-## Project layout expectations
-- `idl/ShipThreat.idl` contains the IDL definitions.
-- `idl/generated` should contain the RTI generated type support files.
-- `CMakeLists.txt` should copy `RTIDDSGEN_OUTPUT_DIR` contents to `idl/generated`.
+SDL2 and SDL2_image must be installed and discoverable by CMake. Linux DDS
+builds also require GTK 3 development files and pkg-config for the native
+effector publisher QoS form (`libgtk-3-dev` and `pkg-config` on Debian/Ubuntu).
+DDS is enabled
+by default. For DDS builds,
+configure CMake with `-DUSE_CONNEXT=ON -DRTI_CONNEXTDDS_DIR="$NDDSHOME"`.
+For GUI-only development, `-DUSE_CONNEXT=OFF` explicitly selects standalone
+fallback behavior, but the programs do not communicate with one another.
+The demo launcher rejects these offline binaries.

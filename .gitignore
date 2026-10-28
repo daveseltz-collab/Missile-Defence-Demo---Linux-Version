@@ -1,6 +1,9 @@
 # Build output
 build/
+build-*/
 out/
+__pycache__/
+*.pyc
 
 # Visual Studio
 .vs/

@@ -1,0 +1,52 @@
+<?xml version="1.0"?>
+<!--
+  USER_QOS_PROFILES.xml — RTI Connext DDS QoS configuration for MissileDefense demo.
+
+  Enables RTI Monitoring Library 2.0 on every DomainParticipant in all three processes
+  (command_control, sensor, effector).  Telemetry is published on Domain 101, which is
+  the default domain the RTI Observability Collector Service listens on.
+
+  Collector Service Docker image:
+    docker pull rticom/collector-service:latest
+
+  This file is automatically discovered by Connext in the process working directory,
+  or via the NDDS_QOS_PROFILES environment variable. The Linux launcher sets the
+  working directory to the repository root.
+-->
+<dds xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+     xsi:noNamespaceSchemaLocation="http://community.rti.com/schema/7.7.0/rti_dds_profiles.xsd">
+
+  <qos_library name="MissileDefenseLib">
+
+    <!--
+      is_default_participant_factory_profile="true" is required for the <monitoring>
+      QoS to take effect — it applies at participant-factory (process) scope.
+      is_default_qos="true" applies the participant-level QoS as the default.
+    -->
+    <qos_profile name="Default"
+                 is_default_qos="true"
+                 is_default_participant_factory_profile="true">
+
+      <participant_factory_qos>
+        <monitoring>
+          <enable>true</enable>
+          <!-- Label shown in Collector Service / Admin Console remote debugging view -->
+          <application_name>MissileDefense</application_name>
+          <telemetry_data>
+            <metrics>
+              <element>
+                <!-- Collect all metrics from all resources -->
+                <resource_selection>//*</resource_selection>
+                <enabled_metrics_selection>
+                  <element>*</element>
+                </enabled_metrics_selection>
+              </element>
+            </metrics>
+          </telemetry_data>
+        </monitoring>
+      </participant_factory_qos>
+
+    </qos_profile>
+
+  </qos_library>
+</dds>

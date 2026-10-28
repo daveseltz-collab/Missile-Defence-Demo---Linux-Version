@@ -1,7 +1,9 @@
 #include <SDL.h>
 #include <SDL_image.h>
+#include <algorithm>
 #include <iostream>
 #include <vector>
+#include <deque>
 #include <map>
 #include <chrono>
 #include <thread>
@@ -9,25 +11,18 @@
 #include <cstdint>
 #include <cstdio>
 #include <cmath>
+#include <cstdlib>
+#include <memory>
+#include <string>
 
 #ifdef USE_CONNEXT
 #include <ndds/ndds_cpp.h>
 #include "ShipThreat.h"
 #include "ShipThreatSupport.h"
+#include "threat_qos.h"
 #endif
 
-#if defined(__has_include)
-#  if __has_include("ShipThreat.h")
-#    include "ShipThreat.h"
-#  else
-namespace ship {
-    struct Threat { int id; double x,y,heading,speed; int severity; };
-    struct SensorDetection { int sensor_id; int threat_id; double x,y; int confidence; };
-    struct EffectorAction { int effector_id; int threat_id; bool destroyed; double x,y; };
-}
-#  endif
-#else
-// Fallback types
+#ifndef USE_CONNEXT
 namespace ship {
     struct Threat { int id; double x,y,heading,speed; int severity; };
     struct SensorDetection { int sensor_id; int threat_id; double x,y; int confidence; };
@@ -184,19 +179,127 @@ static const char* effector_name(int id) {
 static const int SHIP_X = 400;
 static const int SHIP_Y = 570;  // waterline y position (side view)
 
+struct EffectorMount {
+    int id;
+    SDL_Point position;
+    SDL_Color color;
+};
+
+static EffectorMount effector_mounts[] = {
+    {1, {SHIP_X + 38, SHIP_Y - 37}, {100, 220, 255, 255}},
+    {2, {SHIP_X + 81, SHIP_Y - 37}, {100, 255, 160, 255}},
+    {3, {SHIP_X - 45, SHIP_Y - 31}, {255, 205, 85, 255}},
+    {4, {SHIP_X - 99, SHIP_Y - 69}, {255, 170, 50, 255}},
+    {5, {SHIP_X + 143, SHIP_Y - 38}, {215, 220, 230, 255}}
+};
+
+static SDL_Point effector_muzzle(const EffectorMount& mount) {
+    switch (mount.id) {
+        case 1: return {mount.position.x + 9, mount.position.y - 19};
+        case 2: return {mount.position.x + 9, mount.position.y - 23};
+        case 3: return {mount.position.x + 9, mount.position.y - 14};
+        case 4: return {mount.position.x - 10, mount.position.y - 13};
+        default: return {mount.position.x + 9, mount.position.y - 10};
+    }
+}
+
+static SDL_Rect effector_bounds(const EffectorMount& mount) {
+    const int x = mount.position.x, y = mount.position.y;
+    switch (mount.id) {
+        case 1: return {x - 17, y - 23, 29, 27};
+        case 2: return {x - 20, y - 27, 33, 31};
+        case 3: return {x - 13, y - 26, 25, 30};
+        case 4: return {x - 17, y - 21, 28, 21};
+        default: return {x - 13, y - 12, 25, 16};
+    }
+}
+
+static void draw_effector_mounts(SDL_Renderer* ren, SDL_Texture* phalanx_tex) {
+    for (const auto& mount : effector_mounts) {
+        const int x = mount.position.x, y = mount.position.y;
+        if (mount.id == 4 && phalanx_tex) {
+            SDL_Rect bounds = effector_bounds(mount);
+            SDL_RenderCopy(ren, phalanx_tex, nullptr, &bounds);
+            continue;
+        }
+        const SDL_Point muzzle = effector_muzzle(mount);
+        auto line = [&](int from_x, int from_y, int to_x, int to_y) {
+            SDL_RenderDrawLine(ren, x + from_x, y + from_y, x + to_x, y + to_y);
+        };
+        SDL_SetRenderDrawColor(ren, 50, 65, 80, 255);
+        SDL_Rect base = {x - 11, y, 22, 4};
+        SDL_RenderFillRect(ren, &base);
+        SDL_SetRenderDrawColor(ren, 160, 190, 205, 255);
+        SDL_Rect pedestal = {x - 4, y - 9, 8, 9};
+        SDL_RenderFillRect(ren, &pedestal);
+        SDL_SetRenderDrawColor(ren, mount.color.r, mount.color.g, mount.color.b, 255);
+        SDL_RenderDrawRect(ren, &base);
+        if (mount.id <= 2) {
+            const int tail_x = mount.id == 1 ? -13 : -16;
+            const float axis_x = float(muzzle.x - (x + tail_x));
+            const float axis_y = float(muzzle.y - (y - 8));
+            const float length = sqrtf(axis_x * axis_x + axis_y * axis_y);
+            auto point = [&](float forward, float side) -> SDL_Point {
+                return {int(muzzle.x + (axis_x * forward - axis_y * side) / length),
+                        int(muzzle.y + (axis_y * forward + axis_x * side) / length)};
+            };
+            for (int stripe = -2; stripe <= 2; ++stripe) {
+                const auto tail = point(-length, float(stripe));
+                const auto nose = point(-6.0f, float(stripe));
+                SDL_RenderDrawLine(ren, tail.x, tail.y, nose.x, nose.y);
+                SDL_RenderDrawLine(ren, nose.x, nose.y, muzzle.x, muzzle.y);
+            }
+            const auto fin = point(-length + 3, 6);
+            const auto root = point(-length + 9, 2);
+            const auto tail = point(-length, 2);
+            SDL_RenderDrawLine(ren, tail.x, tail.y, fin.x, fin.y);
+            SDL_RenderDrawLine(ren, fin.x, fin.y, root.x, root.y);
+            SDL_SetRenderDrawColor(ren, 35, 90, 130, 255);
+            const auto band_top = point(-10, -2);
+            const auto band_bottom = point(-10, 2);
+            SDL_RenderDrawLine(ren, band_top.x, band_top.y, band_bottom.x, band_bottom.y);
+            line(-3, -6, 4, -6);
+        } else if (mount.id == 3) {
+            for (int tube = 0; tube < 3; ++tube) {
+                const int offset = tube * 4;
+                line(-11, -5 - offset, 9, -14 - offset);
+                line(-11, -8 - offset, 9, -17 - offset);
+                line(-11, -5 - offset, -11, -8 - offset);
+                line(9, -14 - offset, 9, -17 - offset);
+            }
+        } else if (mount.id == 4) {
+            SDL_Rect housing = {x - 10, y - 11, 11, 10};
+            SDL_RenderFillRect(ren, &housing);
+            SDL_SetRenderDrawColor(ren, 225, 235, 240, 255);
+            for (int dome_y = -21; dome_y <= -12; ++dome_y) {
+                const int half_width = dome_y < -18 ? 3 : 5;
+                line(-5 - half_width, dome_y, -5 + half_width, dome_y);
+            }
+            SDL_SetRenderDrawColor(ren, mount.color.r, mount.color.g, mount.color.b, 255);
+            for (int barrel = 0; barrel < 3; ++barrel)
+                line(-1, -10 + barrel, -10, -14 + barrel);
+        } else {
+            for (int armor_y = -10; armor_y < 0; ++armor_y)
+                line(armor_y < -6 ? -8 : -11, armor_y, 0, armor_y);
+            line(-1, -6, 9, -10);
+            line(-1, -5, 9, -9);
+        }
+    }
+}
+
 struct LaunchPlume { float x, y, age, life; };
 struct KillBlast   { float x, y, age, life; };
 struct Interceptor { float x, y; int target_id; float speed, age, life; bool will_kill, done; };
 
 // Draw typed threat shape; angle = atan2 direction of travel toward ship
-static void draw_threat(SDL_Renderer* ren, int x, int y, float angle, int type) {
+static void draw_threat(SDL_Renderer* ren, int x, int y, float angle, int type, Uint8 alpha = 255) {
     float ca = cosf(angle), sa = sinf(angle);
     auto pt = [&](float fwd, float rt) -> SDL_Point {
         return { x + int(ca*fwd - sa*rt), y + int(sa*fwd + ca*rt) };
     };
     if (type == 0) {
         // Ballistic missile: elongated body + tail fins
-        SDL_SetRenderDrawColor(ren, 255, 80, 30, 255);
+        SDL_SetRenderDrawColor(ren, 255, 80, 30, alpha);
         SDL_Point tip  = pt( 9, 0);
         SDL_Point body = pt(-5, 0);
         SDL_Point fl   = pt(-5, 5);
@@ -209,7 +312,7 @@ static void draw_threat(SDL_Renderer* ren, int x, int y, float angle, int type) 
         SDL_RenderDrawLine(ren, n3.x,   n3.y,   tip.x,  tip.y );
     } else if (type == 1) {
         // Drone / UAS: X-frame with rotor blobs
-        SDL_SetRenderDrawColor(ren, 180, 40, 210, 255);
+        SDL_SetRenderDrawColor(ren, 180, 40, 210, alpha);
         for (int arm = 0; arm < 4; arm++) {
             float aa = arm * 3.14159f / 2.0f + 3.14159f / 4.0f;
             SDL_Point tip2 = { x + int(cosf(aa)*8), y + int(sinf(aa)*8) };
@@ -221,7 +324,7 @@ static void draw_threat(SDL_Renderer* ren, int x, int y, float angle, int type) 
         SDL_RenderFillRect(ren, &body2);
     } else {
         // Anti-ship cruise missile: swept delta wing
-        SDL_SetRenderDrawColor(ren, 255, 50, 50, 255);
+        SDL_SetRenderDrawColor(ren, 255, 50, 50, alpha);
         SDL_Point tip  = pt( 9, 0);
         SDL_Point wl   = pt(-5, 8);
         SDL_Point wr   = pt(-5,-8);
@@ -462,6 +565,7 @@ static void draw_blast(SDL_Renderer* ren, const KillBlast& b) {
 #ifdef USE_CONNEXT
 // DDS globals
 static ship::ThreatDataWriter *g_threat_writer = nullptr;
+static std::map<int, std::unique_ptr<ThreatPublisher>> g_configured_publishers;
 
 class SensorDetectionListener : public DDSDataReaderListener {
 public:
@@ -508,9 +612,13 @@ public:
             for (DDS_Long i = 0; i < seq.length(); ++i) {
                 latest[seq[i].effector_id]    = seq[i];
                 last_seen[seq[i].effector_id] = std::chrono::steady_clock::now();
-                // Queue visual effect: plume at bow, optional blast at threat
+                const EffectorMount* mount = nullptr;
+                for (const auto& candidate : effector_mounts)
+                    if (candidate.id == seq[i].effector_id) mount = &candidate;
+                if (!mount) continue;
+                const auto muzzle = effector_muzzle(*mount);
                 pending_fx.push_back({
-                    float(SHIP_X + 40), float(SHIP_Y - 26),   // VLS on forward deck
+                    float(muzzle.x), float(muzzle.y),
                     int(seq[i].threat_id),
                     int(seq[i].effector_id),
                     seq[i].destroyed != DDS_BOOLEAN_FALSE
@@ -529,21 +637,241 @@ static SensorDetectionListener sensor_listener;
 static EffectorActionListener effector_listener;
 #endif
 
-void publishThreat(const ship::Threat &t)
+void publishThreat(const ship::Threat &t, std::deque<ship::Threat>& history)
 {
 #ifdef USE_CONNEXT
-    if (g_threat_writer) {
+    const auto configured = g_configured_publishers.find(t.id);
+    auto* writer = configured == g_configured_publishers.end()
+        ? g_threat_writer : configured->second->writer;
+    if (writer) {
         ship::Threat sample = t;
-        DDS_ReturnCode_t ret = g_threat_writer->write(sample, DDS_HANDLE_NIL);
-        if (ret != DDS_RETCODE_OK) std::cerr << "Threat write failed: " << ret << std::endl;
-        return;
-    }
+        DDS_ReturnCode_t ret = writer->write(sample, DDS_HANDLE_NIL);
+        if (ret != DDS_RETCODE_OK) {
+            std::cerr << "Threat write failed: " << ret << std::endl;
+            return;
+        }
+    } else
 #endif
-    std::cout << "[PUB] Threat id=" << t.id << " x=" << t.x << " y=" << t.y << "\n";
+    {
+        std::cout << "[PUB] Threat id=" << t.id << " x=" << t.x << " y=" << t.y << "\n";
+    }
+    history.push_back(t);
+    if (history.size() > 5) history.pop_front();
 }
+
+#ifdef USE_CONNEXT
+static int check_effector_qos()
+{
+    auto* factory = DDSDomainParticipantFactory::get_instance();
+    auto* participant = factory->create_participant(
+        0, DDS_PARTICIPANT_QOS_DEFAULT, nullptr, DDS_STATUS_MASK_NONE);
+    if (!participant) return 1;
+    bool passed = false;
+    {
+        effector_qos::Channel channel;
+        effector_qos::Settings originals[5];
+        bool changed = false;
+        std::string error;
+        auto snapshot = [](const effector_qos::Settings& settings) {
+            std::ostringstream output;
+            effector_qos::encode(output, settings);
+            return output.str();
+        };
+        passed = [&]() {
+            if (!channel.initialize(participant, false)) return false;
+            for (int id = 1; id <= 5; ++id) {
+                participant->get_default_publisher_qos(originals[id - 1].publisher);
+                participant->get_default_datawriter_qos(originals[id - 1].writer);
+                if (!channel.exchange("GET", id, originals[id - 1], error)) return false;
+            }
+            auto requested = originals[3];
+            requested.writer.history.kind = DDS_KEEP_LAST_HISTORY_QOS;
+            requested.writer.history.depth = 3;
+            if (!channel.exchange("SET", 4, requested, error)) return false;
+            changed = true;
+            if (!channel.exchange("GET", 4, requested, error) || requested.writer.history.depth != 3) {
+                error = "CIWS history change did not persist.";
+                return false;
+            }
+            for (int id : {1, 2, 3, 5}) {
+                auto other = originals[id - 1];
+                if (!channel.exchange("GET", id, other, error)) return false;
+                if (snapshot(other) != snapshot(originals[id - 1])) {
+                    error = "Changing CIWS also changed another effector.";
+                    return false;
+                }
+            }
+            requested.writer.history.depth = 0;
+            if (channel.exchange("SET", 4, requested, error)) {
+                error = "Invalid history depth was accepted.";
+                return false;
+            }
+            error.clear();
+            if (!channel.exchange("GET", 4, requested, error) || requested.writer.history.depth != 3) {
+                error = "A rejected update changed the live effector settings.";
+                return false;
+            }
+            return true;
+        }();
+        if (changed && !channel.exchange("SET", 4, originals[3], error)) passed = false;
+        if (!passed) std::cerr << "Effector QoS check failed: " << error << '\n';
+        else std::cout << "Effector QoS check passed: GET/SET, persistence, isolation, rejection, restoration.\n";
+    }
+    participant->delete_contained_entities();
+    factory->delete_participant(participant);
+    return passed ? 0 : 1;
+}
+
+static int check_reader_qos()
+{
+    auto* factory = DDSDomainParticipantFactory::get_instance();
+    auto* participant = factory->create_participant(
+        0, DDS_PARTICIPANT_QOS_DEFAULT, nullptr, DDS_STATUS_MASK_NONE);
+    if (!participant) return 1;
+    bool passed = false;
+    std::string error;
+    {
+        effector_qos::Channel sensor_control, effector_control;
+        auto snapshot = [](const effector_qos::ReaderSettings& settings) {
+            std::ostringstream output;
+            effector_qos::encode(output, settings);
+            return output.str();
+        };
+        auto check_remote = [&](effector_qos::Channel& control) {
+            effector_qos::ReaderSettings original;
+            participant->get_default_subscriber_qos(original.subscriber);
+            participant->get_default_datareader_qos(original.reader);
+            if (!control.exchange("GET_READER", 0, original, error)) return false;
+            auto requested = original;
+            requested.reader.history.kind = DDS_KEEP_LAST_HISTORY_QOS;
+            requested.reader.history.depth = 3;
+            requested.reader.deadline.period = DDS_DURATION_INFINITE;
+            requested.reader.time_based_filter.minimum_separation = {0, 100000000};
+            requested.subscriber.partition.name.ensure_length(1, 1);
+            DDS_String_free(requested.subscriber.partition.name[0]);
+            requested.subscriber.partition.name[0] = DDS_String_dup("Reader QoS check partition");
+            const auto expected = snapshot(requested);
+            if (!control.exchange("SET_READER", 0, requested, error)) return false;
+            bool valid = control.exchange("GET_READER", 0, requested, error) && snapshot(requested) == expected;
+            if (valid) {
+                auto invalid = requested;
+                invalid.reader.history.depth = 0;
+                valid = !control.exchange("SET_READER", 0, invalid, error);
+                invalid = requested;
+                invalid.reader.deadline.period = {0, 50000000};
+                valid = valid && !control.exchange("SET_READER", 0, invalid, error);
+                error.clear();
+                valid = valid && control.exchange("GET_READER", 0, requested, error) && snapshot(requested) == expected;
+            }
+            if (!control.exchange("SET_READER", 0, original, error)) return false;
+            if (!valid && error.empty()) error = "Remote reader readback or rejection check failed.";
+            return valid;
+        };
+        passed = [&]() {
+            if (!sensor_control.initialize(participant, false, "Sensor") ||
+                !effector_control.initialize(participant, false)) {
+                error = "Cannot initialize reader QoS check channels.";
+                return false;
+            }
+            if (!check_remote(sensor_control) || !check_remote(effector_control)) return false;
+            ship::EffectorActionTypeSupport::register_type(participant, ship::EffectorActionTypeSupport::get_type_name());
+            auto* topic = participant->create_topic("ReaderQosCheckActions",
+                ship::EffectorActionTypeSupport::get_type_name(), DDS_TOPIC_QOS_DEFAULT, nullptr, DDS_STATUS_MASK_NONE);
+            effector_qos::ReaderSettings defaults;
+            participant->get_default_subscriber_qos(defaults.subscriber);
+            participant->get_default_datareader_qos(defaults.reader);
+            defaults.reader.reliability.kind = DDS_RELIABLE_RELIABILITY_QOS;
+            auto create_filtered = [&](int id) {
+                DDS_StringSeq parameters;
+                parameters.ensure_length(1, 1);
+                parameters[0] = DDS_String_dup(std::to_string(id).c_str());
+                const auto name = "ReaderQosCheckFilter" + std::to_string(id);
+                auto* filtered = participant->create_contentfilteredtopic(
+                    name.c_str(), topic, "effector_id = %0", parameters);
+                return filtered ? effector_qos::create_reader(participant, filtered, nullptr,
+                    defaults, topic->get_name()) : nullptr;
+            };
+            auto sm2_reader = create_filtered(1);
+            auto ciws_reader = create_filtered(4);
+            if (!sm2_reader || !ciws_reader) { error = "Cannot create filtered action readers."; return false; }
+            const auto sm2_original = snapshot(sm2_reader->settings);
+            auto changed = ciws_reader->settings;
+            changed.reader.history.depth = 3;
+            if (!effector_qos::replace_reader(ciws_reader, changed, error)) return false;
+            if (snapshot(sm2_reader->settings) != sm2_original || ciws_reader->settings.reader.history.depth != 3) {
+                error = "Action reader change was not isolated.";
+                return false;
+            }
+            auto* publisher = participant->create_publisher(DDS_PUBLISHER_QOS_DEFAULT, nullptr, DDS_STATUS_MASK_NONE);
+            DDS_DataWriterQos writer_qos;
+            participant->get_default_datawriter_qos(writer_qos);
+            writer_qos.reliability.kind = DDS_RELIABLE_RELIABILITY_QOS;
+            auto* writer = publisher ? ship::EffectorActionDataWriter::narrow(publisher->create_datawriter(
+                topic, writer_qos, nullptr, DDS_STATUS_MASK_NONE)) : nullptr;
+            if (!writer) { error = "Cannot create action check writer."; return false; }
+            const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+            bool sent = false, received_sm2 = false, received_ciws = false;
+            while (std::chrono::steady_clock::now() < until && !(received_sm2 && received_ciws)) {
+                DDS_PublicationMatchedStatus matched;
+                if (!sent && writer->get_publication_matched_status(matched) == DDS_RETCODE_OK && matched.current_count == 2) {
+                    ship::EffectorAction sample{};
+                    sample.effector_id = 1;
+                    sample.threat_id = 900001;
+                    writer->write(sample, DDS_HANDLE_NIL);
+                    sample.effector_id = 4;
+                    writer->write(sample, DDS_HANDLE_NIL);
+                    sent = true;
+                }
+                auto take = [&](effector_qos::ReaderEndpoint& endpoint, int expected, bool& received) {
+                    auto* reader = ship::EffectorActionDataReader::narrow(endpoint.reader);
+                    ship::EffectorActionSeq samples;
+                    DDS_SampleInfoSeq infos;
+                    if (reader->take(samples, infos, DDS_LENGTH_UNLIMITED, DDS_ANY_SAMPLE_STATE,
+                        DDS_ANY_VIEW_STATE, DDS_ANY_INSTANCE_STATE) == DDS_RETCODE_OK) {
+                        bool valid = true;
+                        for (DDS_Long index = 0; index < samples.length(); ++index) {
+                            if (!infos[index].valid_data) continue;
+                            if (samples[index].effector_id != expected) valid = false;
+                            else received = true;
+                        }
+                        reader->return_loan(samples, infos);
+                        return valid;
+                    }
+                    return true;
+                };
+                if (!take(*sm2_reader, 1, received_sm2) || !take(*ciws_reader, 4, received_ciws)) {
+                    error = "An action reader received the wrong effector ID.";
+                    return false;
+                }
+                std::this_thread::sleep_for(std::chrono::milliseconds(20));
+            }
+            if (!received_sm2 || !received_ciws) { error = "Filtered action delivery timed out."; return false; }
+            return true;
+        }();
+    }
+    participant->delete_contained_entities();
+    factory->delete_participant(participant);
+    if (passed) std::cout << "Reader QoS check passed: both remote readers, readback, rejection, restoration, isolated action delivery.\n";
+    else std::cerr << "Reader QoS check failed: " << error << '\n';
+    return passed ? 0 : 1;
+}
+#endif
 
 int main(int argc, char **argv)
 {
+    if (argc == 2 && std::string(argv[1]) == "--check-dds") {
+#ifdef USE_CONNEXT
+        std::cout << "Command & Control: DDS enabled (domain 0).\n";
+        return 0;
+#else
+        std::cerr << "Command & Control: DDS disabled; rebuild with -DUSE_CONNEXT=ON.\n";
+        return 1;
+#endif
+    }
+#ifdef USE_CONNEXT
+    if (argc == 2 && std::string(argv[1]) == "--check-effector-qos") return check_effector_qos();
+    if (argc == 2 && std::string(argv[1]) == "--check-reader-qos") return check_reader_qos();
+#endif
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         std::cerr << "SDL_Init Error: " << SDL_GetError() << std::endl;
         return 1;
@@ -587,9 +915,70 @@ int main(int argc, char **argv)
         }
     }
 
+    SDL_Texture* phalanx_tex = nullptr;
+    {
+        char img_path[2048] = {};
+        char* base = SDL_GetBasePath();
+        SDL_snprintf(img_path, sizeof(img_path), "%sStylized Orange Phalanx CIWS Firing.png",
+                     base ? base : "");
+        SDL_free(base);
+        SDL_Surface* original = IMG_Load(img_path);
+        if (original) {
+            SDL_Surface* surface = SDL_ConvertSurfaceFormat(original, SDL_PIXELFORMAT_RGBA32, 0);
+            SDL_FreeSurface(original);
+            if (surface && SDL_LockSurface(surface) == 0) {
+                for (int row = 0; row < surface->h; ++row) {
+                    auto* pixels = reinterpret_cast<Uint32*>(
+                        static_cast<Uint8*>(surface->pixels) + row * surface->pitch);
+                    for (int column = 0; column < surface->w; ++column) {
+                        Uint8 red, green, blue, alpha;
+                        SDL_GetRGBA(pixels[column], surface->format, &red, &green, &blue, &alpha);
+                        const int lightest = (std::max)({int(red), int(green), int(blue)});
+                        const int darkest = (std::min)({int(red), int(green), int(blue)});
+                        if (darkest >= 230 && lightest - darkest < 20) {
+                            alpha = Uint8(int(alpha) * (255 - darkest) / 25);
+                            pixels[column] = SDL_MapRGBA(surface->format, red, green, blue, alpha);
+                        }
+                    }
+                }
+                SDL_UnlockSurface(surface);
+                phalanx_tex = SDL_CreateTextureFromSurface(ren, surface);
+                if (phalanx_tex) {
+                    SDL_SetTextureBlendMode(phalanx_tex, SDL_BLENDMODE_BLEND);
+                    SDL_SetTextureScaleMode(phalanx_tex, SDL_ScaleModeLinear);
+                }
+            }
+            SDL_FreeSurface(surface);
+        } else {
+            std::cerr << "IMG_Load (" << img_path << "): " << IMG_GetError() << std::endl;
+        }
+    }
+
+    SDL_Rect ship_bounds = {};
+    if (ship_tex) {
+        int texture_width = 0, texture_height = 0;
+        SDL_QueryTexture(ship_tex, nullptr, nullptr, &texture_width, &texture_height);
+        const int display_height = 84;
+        const int display_width = texture_height > 0
+            ? display_height * texture_width / texture_height : 276;
+        ship_bounds = {SHIP_X - display_width / 2, SHIP_Y + 5 - display_height,
+                       display_width, display_height};
+        const SDL_FPoint locations[] = {
+            {0.70f, 0.77f}, {0.82f, 0.77f}, {0.29f, 0.77f},
+            {0.42f, 0.59f}, {0.91f, 0.76f}
+        };
+        for (int index = 0; index < 5; ++index) {
+            effector_mounts[index].position = {
+                ship_bounds.x + int(locations[index].x * ship_bounds.w),
+                ship_bounds.y + int(locations[index].y * ship_bounds.h)
+            };
+        }
+    }
+
     bool running = true;
     SDL_Event e;
     std::vector<ship::Threat> threats;
+    std::map<int, std::deque<ship::Threat>> threat_history;
     std::vector<LaunchPlume>  plumes;
     std::vector<KillBlast>    blasts;
     std::vector<Interceptor>  interceptors;
@@ -600,8 +989,15 @@ int main(int argc, char **argv)
     // DDS setup
     DDSDomainParticipant *participant = DDSDomainParticipantFactory::get_instance()->create_participant(
         0, DDS_PARTICIPANT_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
+    DDSTopic* threat_topic = nullptr;
+    DDSTopic* effector_topic = nullptr;
+    effector_qos::Channel qos_channel;
+    effector_qos::Channel sensor_qos_channel;
+    std::vector<std::unique_ptr<effector_qos::ReaderEndpoint>> action_readers(5);
+    std::vector<ReaderQosTarget> threat_reader_targets;
     if (participant == NULL) {
         std::cerr << "create_participant error" << std::endl;
+        return 1;
     } else {
         // register types
         ship::ThreatTypeSupport::register_type(participant, ship::ThreatTypeSupport::get_type_name());
@@ -609,45 +1005,224 @@ int main(int argc, char **argv)
         ship::EffectorActionTypeSupport::register_type(participant, ship::EffectorActionTypeSupport::get_type_name());
 
         // create topics
-        DDSTopic *threat_topic = participant->create_topic("ThreatTopic",
+        threat_topic = participant->create_topic("ThreatTopic",
             ship::ThreatTypeSupport::get_type_name(), DDS_TOPIC_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
         DDSTopic *sensor_topic = participant->create_topic("SensorDetectionTopic",
             ship::SensorDetectionTypeSupport::get_type_name(), DDS_TOPIC_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
-        DDSTopic *effector_topic = participant->create_topic("EffectorActionTopic",
+        effector_topic = participant->create_topic("EffectorActionTopic",
             ship::EffectorActionTypeSupport::get_type_name(), DDS_TOPIC_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
+        if (!threat_topic || !sensor_topic || !effector_topic) {
+            std::cerr << "Cannot create command-control DDS topics.\n";
+            return 1;
+        }
+        if (!qos_channel.initialize(participant, false)) {
+            std::cerr << "Cannot initialize effector QoS control channel.\n";
+            return 1;
+        }
+        if (!sensor_qos_channel.initialize(participant, false, "Sensor")) {
+            std::cerr << "Cannot initialize sensor QoS control channel.\n";
+            return 1;
+        }
+        auto reader_target = [participant](const char* name, effector_qos::Channel& control) {
+            ReaderQosTarget target;
+            target.name = name;
+            target.scope = "Shared ThreatTopic reader. The selected QoS is applied during publisher setup.";
+            target.topic_name = "ThreatTopic";
+            target.get = [participant, channel = &control](effector_qos::ReaderSettings& settings,
+                                                          std::string& error) {
+                participant->get_default_subscriber_qos(settings.subscriber);
+                participant->get_default_datareader_qos(settings.reader);
+                return channel->exchange("GET_READER", 0, settings, error);
+            };
+            target.set = [channel = &control](const effector_qos::ReaderSettings& settings, std::string& error) {
+                auto requested = settings;
+                return channel->exchange("SET_READER", 0, requested, error);
+            };
+            return target;
+        };
+        threat_reader_targets.push_back(reader_target("Sensor Reader", sensor_qos_channel));
+        threat_reader_targets.push_back(reader_target("Effector Reader", qos_channel));
 
         // publisher/writer
         DDSPublisher *publisher = participant->create_publisher(DDS_PUBLISHER_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
+        if (!publisher) { std::cerr << "Cannot create threat publisher.\n"; return 1; }
         DDSDataWriter *dw = publisher->create_datawriter(threat_topic, DDS_DATAWRITER_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
         g_threat_writer = ship::ThreatDataWriter::narrow(dw);
+        if (!g_threat_writer) { std::cerr << "Cannot create threat writer.\n"; return 1; }
 
         // subscriber/listeners
         DDSSubscriber *subscriber = participant->create_subscriber(DDS_SUBSCRIBER_QOS_DEFAULT, NULL, DDS_STATUS_MASK_NONE);
+        if (!subscriber) { std::cerr << "Cannot create sensor subscriber.\n"; return 1; }
 
         DDSDataReader *sd_dr = subscriber->create_datareader(sensor_topic, DDS_DATAREADER_QOS_DEFAULT, &sensor_listener, DDS_DATA_AVAILABLE_STATUS);
+        if (!sd_dr) { std::cerr << "Cannot create sensor detection reader.\n"; return 1; }
 
-        DDSDataReader *ea_dr = subscriber->create_datareader(effector_topic, DDS_DATAREADER_QOS_DEFAULT, &effector_listener, DDS_DATA_AVAILABLE_STATUS);
+        effector_qos::ReaderSettings reader_defaults;
+        participant->get_default_subscriber_qos(reader_defaults.subscriber);
+        participant->get_default_datareader_qos(reader_defaults.reader);
+        for (int id = 1; id <= 5; ++id) {
+            DDS_StringSeq parameters;
+            parameters.ensure_length(1, 1);
+            parameters[0] = DDS_String_dup(std::to_string(id).c_str());
+            const auto name = "EffectorActionReader" + std::to_string(id);
+            auto* filtered_topic = participant->create_contentfilteredtopic(
+                name.c_str(), effector_topic, "effector_id = %0", parameters);
+            if (filtered_topic)
+                action_readers[id - 1] = effector_qos::create_reader(participant, filtered_topic,
+                    &effector_listener, reader_defaults, effector_topic->get_name());
+            if (!action_readers[id - 1]) {
+                std::cerr << "Cannot create action reader for effector " << id << '\n';
+                return 1;
+            }
+        }
     }
+    std::cout << "Command & Control: DDS ready on domain 0." << std::endl;
 #endif
 
     auto last          = std::chrono::steady_clock::now();
     auto last_republish = std::chrono::steady_clock::now();
 
+    // Threat spawn dialog state
+    int  spawn_type         = 2;     // 0=BALST  1=DRONE  2=ASCM
+    bool auto_spawn_enabled = false;
+    int  auto_interval_ms   = 2000;  // milliseconds between auto-spawns
+    std::chrono::steady_clock::time_point last_auto_spawn = std::chrono::steady_clock::now();
+    srand(static_cast<unsigned int>(SDL_GetTicks()));
+    bool show_legend     = false;
+    int  threats_breached = 0;
+    auto last_breach_time = std::chrono::steady_clock::now() - std::chrono::seconds(60);
+
     while (running) {
+#ifdef USE_CONNEXT
+        process_qos_dialog_events();
+#endif
+        // Lambda: spawn a threat of the given type at a random top-of-screen position
+        auto spawnThreatAtTop = [&](int type) {
+            ship::Threat t{};
+            t.id      = next_id++;
+            t.x       = 20.0 + rand() % 760;
+            t.y       = 5.0;
+            t.heading = 180.0;
+            switch (type) {
+                case 0: t.speed = 45.0; break;  // BALST: fast ballistic
+                case 1: t.speed = 15.0; break;  // DRONE: slow UAS
+                case 2: t.speed = 30.0; break;  // ASCM:  cruise missile
+                default: t.speed = 22.0;
+            }
+            t.severity = type;
+            threats.push_back(t);
+            publishThreat(t, threat_history[t.id]);
+            last_auto_spawn = std::chrono::steady_clock::now();
+        };
+
+        // Dialog button rects — panel-positioned, DY uses panel_dialog_y from previous frame
+        const int DX = 810, DY = 474, DW = 246, DH = 124;
+        SDL_Rect dlg_type_btns[3] = {
+            {DX+4,   DY+23, 77, 20}, {DX+84,  DY+23, 77, 20}, {DX+164, DY+23, 77, 20}
+        };
+        SDL_Rect dlg_btn_spawn = {DX+4, DY+47, 238, 20};
+        SDL_Rect dlg_btn_auto  = {DX+4, DY+74, 116, 20};
+        SDL_Rect dlg_iv_btns[4] = {
+            {DX+4,   DY+98, 57, 20}, {DX+64,  DY+98, 57, 20},
+            {DX+124, DY+98, 57, 20}, {DX+184, DY+98, 57, 20}
+        };
+        const SDL_Rect legend_btn       = {5, 575, 66, 20};
+        const SDL_Rect legend_close_btn = {738, 102, 20, 18};
+        auto in_rect = [](const SDL_Rect& r, int x, int y) {
+            return x >= r.x && x < r.x+r.w && y >= r.y && y < r.y+r.h;
+        };
+
         while (SDL_PollEvent(&e)) {
             if (e.type == SDL_QUIT) running = false;
-            if (e.type == SDL_MOUSEBUTTONDOWN && e.button.x < 800 && e.button.y < 460) {
-                int x = e.button.x;
-                int y = e.button.y;
-                ship::Threat t;
-                t.id = next_id++;
-                t.x = x;
-                t.y = y;
-                t.heading = 180.0;
-                t.speed = 22.0;   // px/sec — slow enough to track visually
-                t.severity = 1;
-                threats.push_back(t);
-                publishThreat(t);
+            if (e.type == SDL_MOUSEBUTTONDOWN) {
+                int mx = e.button.x, my = e.button.y;
+                if (in_rect(legend_btn, mx, my)) {
+                    show_legend = !show_legend;
+                } else if (show_legend) {
+                    if (in_rect(legend_close_btn, mx, my)) show_legend = false;
+                } else {
+                    const EffectorMount* selected = nullptr;
+                    int nearest_distance = 0;
+                    if (e.button.button == SDL_BUTTON_LEFT) {
+                        for (const auto& mount : effector_mounts) {
+                            if (!in_rect(effector_bounds(mount), mx, my)) continue;
+                            const int dx = mx - mount.position.x;
+                            const int dy = my - (mount.position.y - 12);
+                            const int distance = dx * dx + dy * dy;
+                            if (!selected || distance < nearest_distance) {
+                                selected = &mount;
+                                nearest_distance = distance;
+                            }
+                        }
+                    }
+                    if (selected) {
+#ifdef USE_CONNEXT
+                        const int id = selected->id;
+                        ReaderQosTarget reader_target;
+                        reader_target.name = "Action Reader";
+                        reader_target.topic_name = effector_topic->get_name();
+                        reader_target.scope = "Command & Control reader for this effector only.";
+                        reader_target.get = [&action_readers, id](effector_qos::ReaderSettings& settings,
+                                                                  std::string& error) {
+                            if (!action_readers[id - 1]) { error = "Action reader is unavailable."; return false; }
+                            settings = action_readers[id - 1]->settings;
+                            return true;
+                        };
+                        reader_target.set = [&action_readers, id](const effector_qos::ReaderSettings& settings,
+                                                                  std::string& error) {
+                            return effector_qos::replace_reader(action_readers[id - 1], settings, error);
+                        };
+                        show_effector_qos_dialog(win, participant, effector_topic, qos_channel,
+                            id, effector_name(id), {reader_target});
+#else
+                        SDL_ShowSimpleMessageBox(SDL_MESSAGEBOX_ERROR, "Effector QoS",
+                            "Effector QoS requires a USE_CONNEXT build.", win);
+#endif
+                        last = last_republish = last_auto_spawn = std::chrono::steady_clock::now();
+                        continue;
+                    }
+                    bool in_dlg = (mx >= DX && mx < DX+DW && my >= DY && my < DY+DH);
+                    if (in_dlg) {
+                        // Type selection
+                        for (int i = 0; i < 3; i++)
+                            if (in_rect(dlg_type_btns[i], mx, my)) spawn_type = i;
+                        // Spawn one
+                        if (in_rect(dlg_btn_spawn, mx, my)) {
+#ifdef USE_CONNEXT
+                            auto endpoint = show_threat_qos_dialog(win, participant, threat_topic, threat_reader_targets);
+                            if (endpoint) {
+                                g_configured_publishers.emplace(next_id, std::move(endpoint));
+                                spawnThreatAtTop(spawn_type);
+                            }
+#else
+                            spawnThreatAtTop(spawn_type);
+#endif
+                            last = last_republish = last_auto_spawn = std::chrono::steady_clock::now();
+                        }
+                        // Auto-spawn toggle
+                        if (in_rect(dlg_btn_auto, mx, my)) auto_spawn_enabled = !auto_spawn_enabled;
+                        // Interval selection
+                        const int iv_vals[4] = {1000, 2000, 3000, 4000};
+                        for (int i = 0; i < 4; i++)
+                            if (in_rect(dlg_iv_btns[i], mx, my)) auto_interval_ms = iv_vals[i];
+                    } else if (mx < 800 && my < 460) {
+                        // Click-to-place threat anywhere in the game area
+                        ship::Threat t{};
+                        t.id      = next_id++;
+                        t.x       = mx;
+                        t.y       = my;
+                        t.heading = 180.0;
+                        switch (spawn_type) {
+                            case 0: t.speed = 45.0; break;
+                            case 1: t.speed = 15.0; break;
+                            case 2: t.speed = 30.0; break;
+                            default: t.speed = 22.0;
+                        }
+                        t.severity = spawn_type;
+                        threats.push_back(t);
+                        publishThreat(t, threat_history[t.id]);
+                    }
+                }
             }
         }
 
@@ -672,13 +1247,31 @@ int main(int argc, char **argv)
             auto rep_now = std::chrono::steady_clock::now();
             if (rep_now - last_republish >= std::chrono::milliseconds(500)) {
                 last_republish = rep_now;
-                for (auto& t : threats) publishThreat(t);
+                for (auto& t : threats) publishThreat(t, threat_history[t.id]);
             }
         }
 
-        // Cull threats that reach the hull (50 px from ship center)
-        threats.erase(std::remove_if(threats.begin(), threats.end(), [&](const ship::Threat &t){
-            double dx = cx - t.x; double dy = cy - t.y; return (dx*dx+dy*dy) < 4900.0; }), threats.end());
+        // Auto-spawn threats at configured interval
+        {
+            auto now_as = std::chrono::steady_clock::now();
+            if (auto_spawn_enabled &&
+                std::chrono::duration_cast<std::chrono::milliseconds>(
+                    now_as - last_auto_spawn).count() >= auto_interval_ms) {
+                spawnThreatAtTop(rand() % 3);  // random type each interval
+            }
+        }
+
+        // Cull threats that reach the hull (70 px from ship center); track hull breaches
+        {
+            auto before_sz = threats.size();
+            threats.erase(std::remove_if(threats.begin(), threats.end(), [&](const ship::Threat &t){
+                double dx = cx - t.x; double dy = cy - t.y; return (dx*dx+dy*dy) < 4900.0; }), threats.end());
+            int hit = int(before_sz) - int(threats.size());
+            if (hit > 0) {
+                threats_breached += hit;
+                last_breach_time = std::chrono::steady_clock::now();
+            }
+        }
 
         // Drain new effect events from effector listener
 #ifdef USE_CONNEXT
@@ -739,6 +1332,17 @@ int main(int argc, char **argv)
             threats.erase(std::remove_if(threats.begin(), threats.end(),
                 [kid](const ship::Threat& th){ return th.id == kid; }), threats.end());
 
+        for (auto it = threat_history.begin(); it != threat_history.end();) {
+            const int id = it->first;
+            if (std::none_of(threats.begin(), threats.end(),
+                    [id](const ship::Threat& t){ return t.id == id; })) {
+#ifdef USE_CONNEXT
+                g_configured_publishers.erase(id);
+#endif
+                it = threat_history.erase(it);
+            } else
+                ++it;
+        }
 
         // Render
         SDL_SetRenderDrawColor(ren, 10, 20, 40, 255);   // ocean at night
@@ -779,22 +1383,32 @@ int main(int argc, char **argv)
 
         // Ship photo (or drawn fallback)
         if (ship_tex) {
-            int tw, th;
-            SDL_QueryTexture(ship_tex, nullptr, nullptr, &tw, &th);
-            // Size by height: ~1/2 inch tall at 96 DPI
-            const int DISP_H = 48;
-            int disp_w = (th > 0) ? DISP_H * tw / th : 160;
-            SDL_Rect dst = {cx - disp_w / 2, cy + 5 - DISP_H, disp_w, DISP_H};
-            SDL_RenderCopy(ren, ship_tex, nullptr, &dst);
+            SDL_RenderCopy(ren, ship_tex, nullptr, &ship_bounds);
         } else {
-            draw_destroyer(ren, cx, cy);
+            SDL_RenderSetScale(ren, 1.4f, 1.4f);
+            draw_destroyer(ren, int(cx / 1.4f), int(cy / 1.4f));
+            SDL_RenderSetScale(ren, 1.0f, 1.0f);
         }
+        draw_effector_mounts(ren, phalanx_tex);
+
+        // Published samples form a Shapes Demo-style trail behind the live position.
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+        for (const auto& entry : threat_history) {
+            Uint8 alpha = 45;
+            for (const auto& sample : entry.second) {
+                const float angle = atan2f(float(cy - 16) - float(sample.y),
+                                          float(cx) - float(sample.x));
+                draw_threat(ren, int(sample.x), int(sample.y), angle, sample.severity, alpha);
+                alpha += 25;
+            }
+        }
+        SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
 
         // Threats (typed shapes oriented toward the ship)
         for (auto& t : threats) {
             float tdx = float(cx)      - float(t.x);
             float tdy = float(cy - 16) - float(t.y);
-            draw_threat(ren, int(t.x), int(t.y), atan2f(tdy, tdx), t.id % 3);
+            draw_threat(ren, int(t.x), int(t.y), atan2f(tdy, tdx), t.severity);
         }
 
         // Interceptor missiles (above threats, below blasts)
@@ -813,6 +1427,31 @@ int main(int argc, char **argv)
         // Kill/intercept blasts (topmost layer)
         for (auto& b : blasts) draw_blast(ren, b);
 
+        // ---- Hull breach flash + warning text ----
+        {
+            auto breach_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now() - last_breach_time).count();
+            // Red screen flash (fades over 1.5 s)
+            if (breach_ms < 1500) {
+                float frac = 1.0f - float(breach_ms) / 1500.0f;
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+                SDL_SetRenderDrawColor(ren, 220, 15, 15, Uint8(170 * frac));
+                SDL_Rect flash_r = {0, 0, 800, 600};
+                SDL_RenderFillRect(ren, &flash_r);
+                SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+            }
+            // Warning text for 3 s; blinks after 1.5 s
+            if (threats_breached > 0 && breach_ms < 3000) {
+                bool blink_off = (breach_ms >= 1500) && ((breach_ms / 300) % 2 != 0);
+                if (!blink_off) {
+                    char hb[40];
+                    int n = snprintf(hb, sizeof(hb), "!! HULL BREACH x%d !!", threats_breached);
+                    SDL_SetRenderDrawColor(ren, 255, 50, 50, 255);
+                    draw_text(ren, (800 - n * 12) / 2, 262, hb, 2);
+                }
+            }
+        }
+
 #ifdef USE_CONNEXT
         // Dotted radar-track lines from each detection point to ship bow
         {
@@ -829,6 +1468,7 @@ int main(int argc, char **argv)
             }
         }
         // (effector visuals are handled by the plume / blast effect system above)
+#endif
 
         // ---- Status Panel (right 250 px) ----
         {
@@ -854,6 +1494,24 @@ int main(int argc, char **argv)
                 pcy += 5;
             };
 
+            // ---- HULL STATUS ----
+            {
+                auto bms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - last_breach_time).count();
+                bool flash2 = (bms < 2000) && ((bms / 250) % 2 == 0);
+                if (threats_breached == 0) {
+                    SDL_SetRenderDrawColor(ren, 55, 175, 55, 255);
+                    draw_text(ren, COL_NAME, pcy, "HULL SECURE", 2);
+                } else {
+                    SDL_SetRenderDrawColor(ren,
+                        flash2 ? 255 : 210, flash2 ? 30 : 50, flash2 ? 30 : 50, 255);
+                    char hb[24]; snprintf(hb, sizeof(hb), "BREACHED: %d", threats_breached);
+                    draw_text(ren, COL_NAME, pcy, hb, 2);
+                }
+                pcy += 20;
+                panel_sep();
+            }
+
             // ---- SENSORS ----
             SDL_SetRenderDrawColor(ren, 240, 210, 60, 255);
             draw_text(ren, COL_NAME, pcy, "SENSORS", 2);
@@ -865,6 +1523,7 @@ int main(int argc, char **argv)
             draw_text(ren, COL_CONF,   pcy, "CONF",   1);
             pcy += 11;
             panel_sep();
+#ifdef USE_CONNEXT
             {
                 std::lock_guard<std::mutex> lk2(sensor_listener.mtx);
                 auto now2 = std::chrono::steady_clock::now();
@@ -892,6 +1551,15 @@ int main(int argc, char **argv)
                     pcy += 11;
                 }
             }
+#else
+            SDL_SetRenderDrawColor(ren, 110, 110, 110, 255);
+            for (int id = 1; id <= 4; ++id) {
+                draw_text(ren, COL_NAME, pcy, sensor_name(id), 1);
+                draw_text(ren, COL_THREAT, pcy, " --", 1);
+                draw_text(ren, COL_CONF, pcy, "NO DDS", 1);
+                pcy += 11;
+            }
+#endif
 
             // ---- EFFECTORS ----
             pcy += 4;
@@ -906,6 +1574,7 @@ int main(int argc, char **argv)
             draw_text(ren, COL_STATUS, pcy, "STATUS", 1);
             pcy += 11;
             panel_sep();
+#ifdef USE_CONNEXT
             {
                 std::lock_guard<std::mutex> lk2(effector_listener.mtx);
                 auto now2 = std::chrono::steady_clock::now();
@@ -932,6 +1601,15 @@ int main(int argc, char **argv)
                     draw_text(ren, COL_NAME, pcy, "none", 1);
                 }
             }
+#else
+            SDL_SetRenderDrawColor(ren, 110, 110, 110, 255);
+            for (const auto& mount : effector_mounts) {
+                draw_text(ren, COL_NAME, pcy, effector_name(mount.id), 1);
+                draw_text(ren, COL_TARGET, pcy, " --", 1);
+                draw_text(ren, COL_STATUS, pcy, "NO DDS", 1);
+                pcy += 11;
+            }
+#endif
 
             // ---- INCOMING THREATS ----
             pcy += 4;
@@ -953,15 +1631,15 @@ int main(int argc, char **argv)
                 pcy += 11;
             } else {
                 for (auto& t : threats) {
-                    if (pcy + 11 > 592) break;   // guard panel overflow
+                    if (pcy + 11 > DY) break;   // keep rows above the pinned controls
                     float dx_t = float(t.x) - 400.0f;
                     float dy_t = float(t.y) - 570.0f;
                     float dist_t = sqrtf(dx_t*dx_t + dy_t*dy_t);
                     float tti   = (t.speed > 0.01) ? dist_t / float(t.speed) : 99.0f;
                     int   spd_kt = int(t.speed * 30);  // scale to notional knots for display
                     const char* type_str =
-                        (t.id % 3 == 0) ? "BALST" :
-                        (t.id % 3 == 1) ? "DRONE" : "ASCM ";
+                        (t.severity == 0) ? "BALST" :
+                        (t.severity == 1) ? "DRONE" : "ASCM ";
                     char buf[32];
                     SDL_SetRenderDrawColor(ren, 220, 90, 90, 255);
                     snprintf(buf, sizeof(buf), "T#%d", t.id);
@@ -974,16 +1652,223 @@ int main(int argc, char **argv)
                     pcy += 11;
                 }
             }
+
+            // ---- SPAWN CONTROLS (pinned to panel bottom) ----
+            {
+                const int sy = 474;
+                const int sx = PX;
+                const int sw = PW;
+
+                // Background
+                SDL_Rect dlg = {sx, sy, sw, 124};
+                SDL_SetRenderDrawColor(ren, 18, 22, 38, 255);
+                SDL_RenderFillRect(ren, &dlg);
+
+                // Title bar
+                SDL_Rect title_bar = {sx, sy, sw, 20};
+                SDL_SetRenderDrawColor(ren, 35, 45, 70, 255);
+                SDL_RenderFillRect(ren, &title_bar);
+                SDL_SetRenderDrawColor(ren, 200, 195, 80, 255);
+                draw_text(ren, sx + 51, sy + 3, "SPAWN THREAT", 2);
+
+                // Border + separator under title
+                SDL_SetRenderDrawColor(ren, 70, 85, 110, 255);
+                SDL_RenderDrawRect(ren, &dlg);
+                SDL_RenderDrawLine(ren, sx+2, sy+20, sx+sw-2, sy+20);
+
+                // Type buttons: [BALST] [DRONE] [ASCM ]
+                const char* type_labels[] = {"BALST", "DRONE", "ASCM "};
+                SDL_Rect type_r[3] = {
+                    {sx+4,   sy+23, 77, 20},
+                    {sx+84,  sy+23, 77, 20},
+                    {sx+164, sy+23, 77, 20}
+                };
+                for (int i = 0; i < 3; i++) {
+                    if (i == spawn_type) {
+                        SDL_SetRenderDrawColor(ren, 40, 75, 45, 255);
+                        SDL_RenderFillRect(ren, &type_r[i]);
+                        SDL_SetRenderDrawColor(ren, 80, 210, 90, 255);
+                    } else {
+                        SDL_SetRenderDrawColor(ren, 28, 32, 50, 255);
+                        SDL_RenderFillRect(ren, &type_r[i]);
+                        SDL_SetRenderDrawColor(ren, 100, 105, 130, 255);
+                    }
+                    SDL_RenderDrawRect(ren, &type_r[i]);
+                    draw_text(ren, type_r[i].x + 8, type_r[i].y + 3, type_labels[i], 2);
+                }
+
+                // SPAWN ONE button
+                SDL_Rect spawn_r = {sx+4, sy+47, 238, 20};
+                SDL_SetRenderDrawColor(ren, 30, 55, 90, 255);
+                SDL_RenderFillRect(ren, &spawn_r);
+                SDL_SetRenderDrawColor(ren, 60, 120, 200, 255);
+                SDL_RenderDrawRect(ren, &spawn_r);
+                draw_text(ren, sx + 69, sy + 50, "SPAWN ONE", 2);
+
+                // Separator before auto section
+                SDL_SetRenderDrawColor(ren, 70, 85, 110, 255);
+                SDL_RenderDrawLine(ren, sx+2, sy+71, sx+sw-2, sy+71);
+
+                // AUTO toggle button
+                SDL_Rect auto_r = {sx+4, sy+74, 116, 20};
+                if (auto_spawn_enabled) {
+                    SDL_SetRenderDrawColor(ren, 40, 75, 45, 255);
+                    SDL_RenderFillRect(ren, &auto_r);
+                    SDL_SetRenderDrawColor(ren, 80, 210, 90, 255);
+                } else {
+                    SDL_SetRenderDrawColor(ren, 28, 32, 50, 255);
+                    SDL_RenderFillRect(ren, &auto_r);
+                    SDL_SetRenderDrawColor(ren, 100, 105, 130, 255);
+                }
+                SDL_RenderDrawRect(ren, &auto_r);
+                draw_text(ren, sx + 8, sy + 77, auto_spawn_enabled ? "AUTO: ON " : "AUTO: OFF", 2);
+
+                // INTERVAL label (right of AUTO button)
+                SDL_SetRenderDrawColor(ren, 140, 145, 165, 255);
+                draw_text(ren, sx + 126, sy + 77, "IVRL:", 2);
+
+                // Interval buttons: [1s] [2s] [3s] [4s]
+                const int iv_vals2[4] = {1000, 2000, 3000, 4000};
+                const char* iv_labels[] = {"1s", "2s", "3s", "4s"};
+                SDL_Rect iv_r[4] = {
+                    {sx+4,   sy+98, 57, 20},
+                    {sx+64,  sy+98, 57, 20},
+                    {sx+124, sy+98, 57, 20},
+                    {sx+184, sy+98, 57, 20}
+                };
+                for (int i = 0; i < 4; i++) {
+                    if (auto_interval_ms == iv_vals2[i]) {
+                        SDL_SetRenderDrawColor(ren, 65, 40, 90, 255);
+                        SDL_RenderFillRect(ren, &iv_r[i]);
+                        SDL_SetRenderDrawColor(ren, 170, 110, 220, 255);
+                    } else {
+                        SDL_SetRenderDrawColor(ren, 28, 32, 50, 255);
+                        SDL_RenderFillRect(ren, &iv_r[i]);
+                        SDL_SetRenderDrawColor(ren, 100, 105, 130, 255);
+                    }
+                    SDL_RenderDrawRect(ren, &iv_r[i]);
+                    draw_text(ren, iv_r[i].x + 16, iv_r[i].y + 3, iv_labels[i], 2);
+                }
+            }
         }
         // ---- End Status Panel ----
-#endif
+
+        // ---- Legend button (bottom-left, always visible) ----
+        {
+            SDL_SetRenderDrawColor(ren, show_legend ? 45 : 28, show_legend ? 55 : 34, show_legend ? 80 : 55, 255);
+            SDL_RenderFillRect(ren, &legend_btn);
+            SDL_SetRenderDrawColor(ren, show_legend ? 140 : 95, show_legend ? 160 : 115, show_legend ? 220 : 175, 255);
+            SDL_RenderDrawRect(ren, &legend_btn);
+            SDL_SetRenderDrawColor(ren, 220, 220, 255, 255);
+            draw_text(ren, legend_btn.x + 3, legend_btn.y + 4, "LEGEND", 2);
+        }
+
+        // ---- Legend overlay ----
+        if (show_legend) {
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_BLEND);
+            SDL_SetRenderDrawColor(ren, 0, 0, 10, 195);
+            SDL_Rect dim = {0, 0, 800, 600};
+            SDL_RenderFillRect(ren, &dim);
+            SDL_SetRenderDrawBlendMode(ren, SDL_BLENDMODE_NONE);
+
+            const int LX = 40, LY = 100, LW = 720, LH = 280;
+            SDL_Rect lbox = {LX, LY, LW, LH};
+            SDL_SetRenderDrawColor(ren, 14, 18, 32, 255);
+            SDL_RenderFillRect(ren, &lbox);
+            SDL_SetRenderDrawColor(ren, 80, 95, 140, 255);
+            SDL_RenderDrawRect(ren, &lbox);
+
+            // Title bar
+            SDL_Rect lbar = {LX, LY, LW, 22};
+            SDL_SetRenderDrawColor(ren, 30, 40, 70, 255);
+            SDL_RenderFillRect(ren, &lbar);
+            SDL_SetRenderDrawColor(ren, 80, 95, 140, 255);
+            SDL_RenderDrawLine(ren, LX, LY + 22, LX + LW, LY + 22);
+            SDL_SetRenderDrawColor(ren, 220, 225, 255, 255);
+            draw_text(ren, LX + (LW - 13 * 12) / 2, LY + 4, "SYSTEM LEGEND", 2);
+
+            // Close [X] button
+            SDL_SetRenderDrawColor(ren, 70, 25, 25, 255);
+            SDL_RenderFillRect(ren, &legend_close_btn);
+            SDL_SetRenderDrawColor(ren, 200, 70, 70, 255);
+            SDL_RenderDrawRect(ren, &legend_close_btn);
+            draw_text(ren, legend_close_btn.x + 3, legend_close_btn.y + 3, "X", 2);
+
+            int lcy = LY + 30;
+            const int lcx = LX + 12;
+            struct LegEntry { const char* abbrev; const char* desc; };
+
+            // SENSORS
+            SDL_SetRenderDrawColor(ren, 240, 210, 60, 255);
+            draw_text(ren, lcx, lcy, "SENSORS", 2); lcy += 16;
+            SDL_SetRenderDrawColor(ren, 80, 95, 140, 255);
+            SDL_RenderDrawLine(ren, LX + 4, lcy, LX + LW - 4, lcy); lcy += 5;
+            static const LegEntry s_sensors[] = {
+                {"AN/SPY-1D", "Aegis Phased-Array Radar - primary long-range air defense (220nm)"},
+                {"AN/SPQ-9B", "Horizon Search / Gun Fire Control Radar (40nm)"},
+                {"AN/SPS-67", "Surface Search Radar (25nm)"},
+                {"AN/SLQ-32", "Electronic Warfare / Electronic Support Measures (100nm)"},
+            };
+            SDL_SetRenderDrawColor(ren, 80, 220, 80, 255);
+            for (const auto& en : s_sensors) {
+                char buf[128]; snprintf(buf, sizeof(buf), "%-10s  %s", en.abbrev, en.desc);
+                draw_text(ren, lcx, lcy, buf, 1); lcy += 11;
+            }
+
+            // EFFECTORS
+            lcy += 10;
+            SDL_SetRenderDrawColor(ren, 60, 200, 240, 255);
+            draw_text(ren, lcx, lcy, "EFFECTORS", 2); lcy += 16;
+            SDL_SetRenderDrawColor(ren, 80, 95, 140, 255);
+            SDL_RenderDrawLine(ren, LX + 4, lcy, LX + LW - 4, lcy); lcy += 5;
+            struct EffectorLegEntry { int id; const char* desc; };
+            static const EffectorLegEntry s_effectors[] = {
+                {1, "Standard Missile 2 Medium Range - VLS launched (75nm)"},
+                {2, "Standard Missile 6 Extended Range - VLS launched (130nm)"},
+                {3, "Evolved Sea Sparrow Missile - short-range VLS (27nm)"},
+                {4, "Phalanx Close-In Weapon System - 20mm Gatling gun (1nm)"},
+                {5, "5-inch/62 Caliber Naval Gun - surface and low-altitude threats (13nm)"},
+            };
+            for (const auto& en : s_effectors) {
+                for (const auto& mount : effector_mounts) {
+                    if (mount.id != en.id) continue;
+                    SDL_SetRenderDrawColor(ren, mount.color.r, mount.color.g,
+                                           mount.color.b, mount.color.a);
+                    draw_text(ren, lcx, lcy, effector_name(en.id), 1);
+                    break;
+                }
+                SDL_SetRenderDrawColor(ren, 80, 180, 255, 255);
+                draw_text(ren, lcx + 12 * 6, lcy, en.desc, 1); lcy += 11;
+            }
+
+            // THREATS
+            lcy += 10;
+            SDL_SetRenderDrawColor(ren, 230, 80, 80, 255);
+            draw_text(ren, lcx, lcy, "THREATS", 2); lcy += 16;
+            SDL_SetRenderDrawColor(ren, 80, 95, 140, 255);
+            SDL_RenderDrawLine(ren, LX + 4, lcy, LX + LW - 4, lcy); lcy += 5;
+            static const LegEntry s_threats[] = {
+                {"BALST", "Ballistic Missile - high-altitude fast-descending trajectory"},
+                {"DRONE", "Unmanned Aerial System (UAS) - slow, low-altitude"},
+                {"ASCM",  "Anti-Ship Cruise Missile - sea-skimming high-speed attack"},
+            };
+            SDL_SetRenderDrawColor(ren, 220, 90, 90, 255);
+            for (const auto& en : s_threats) {
+                char buf[128]; snprintf(buf, sizeof(buf), "%-10s  %s", en.abbrev, en.desc);
+                draw_text(ren, lcx, lcy, buf, 1); lcy += 11;
+            }
+        }
 
         SDL_RenderPresent(ren);
 
         std::this_thread::sleep_for(10ms);
     }
 
+#ifdef USE_CONNEXT
+    g_configured_publishers.clear();
+#endif
     if (ship_tex) SDL_DestroyTexture(ship_tex);
+    if (phalanx_tex) SDL_DestroyTexture(phalanx_tex);
     IMG_Quit();
     SDL_DestroyRenderer(ren);
     SDL_DestroyWindow(win);
